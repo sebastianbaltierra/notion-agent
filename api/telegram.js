@@ -34,7 +34,7 @@ export default async function handler(req, res) {
   await sendTelegram(chat_id, "⏳ Processando...");
 
   try {
-    const dbList = Object.entries(DATABASES).map(([name, id]) => `${name}|${id}`).join("\n");
+    const dbList = Object.entries(DATABASES).map(([name, id]) => `${name}: ${id}`).join("\n");
 
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -45,28 +45,41 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 300,
-        system: `Responda APENAS com JSON puro sem nenhum texto antes ou depois. Sem markdown. Sem explicação.
+        max_tokens: 400,
+        system: `Você é um assistente que salva dados no Notion do usuário Sebastian.
 
-Databases:
+Databases disponíveis:
 ${dbList}
 
-Formato exato:
-{"database_id":"ID","database_name":"NOME","title":"TITULO","confirmation":"CONFIRMACAO"}`,
-        messages: [{ role: "user", content: text }, { role: "assistant", content: "{" }]
+IMPORTANTE: Responda SEMPRE com JSON válido neste formato exato:
+{"database_id":"ID_AQUI","database_name":"NOME_AQUI","title":"TITULO_AQUI","confirmation":"mensagem curta em português confirmando o que foi salvo"}
+
+Escolha o database mais adequado para a mensagem do usuário.
+Se for treino → Treinos
+Se for tarefa/lembrete → Tarefas  
+Se for ideia → Ideias
+Se for trade → Diário de Trade
+Se não souber → Tarefas`,
+        messages: [{ role: "user", content: text }]
       })
     });
 
     const claudeData = await claudeRes.json();
-    const rawText = "{" + (claudeData.content?.[0]?.text || "");
-
-    let parsed;
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      await sendTelegram(chat_id, `❌ Debug: ${rawText.slice(0, 300)}`);
+    
+    if (claudeData.error) {
+      await sendTelegram(chat_id, `❌ Erro API: ${claudeData.error.message}`);
       return res.status(200).end();
     }
+
+    const rawText = claudeData.content?.[0]?.text || "";
+    
+    const jsonMatch = rawText.match(/\{[^{}]*\}/);
+    if (!jsonMatch) {
+      await sendTelegram(chat_id, `❌ Resposta inválida: ${rawText.slice(0, 200)}`);
+      return res.status(200).end();
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
 
     const propsRes = await fetch(`${NOTION_API}?action=db-properties`, {
       method: "POST",
@@ -76,21 +89,22 @@ Formato exato:
     const propsData = await propsRes.json();
     const titleField = Object.entries(propsData.properties || {}).find(([, v]) => v.type === "title")?.[0] || "Name";
 
-    const properties = {
-      [titleField]: { title: [{ text: { content: parsed.title } }] }
-    };
-
     const createRes = await fetch(`${NOTION_API}?action=create-task`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ database_id: parsed.database_id, properties })
+      body: JSON.stringify({
+        database_id: parsed.database_id,
+        properties: {
+          [titleField]: { title: [{ text: { content: parsed.title } }] }
+        }
+      })
     });
 
     if (createRes.ok) {
       await sendTelegram(chat_id, `✅ *${parsed.database_name}*\n${parsed.confirmation}`);
     } else {
-      const errData = await createRes.json();
-      await sendTelegram(chat_id, `❌ Notion erro: ${JSON.stringify(errData).slice(0, 200)}`);
+      const err = await createRes.json();
+      await sendTelegram(chat_id, `❌ Notion: ${JSON.stringify(err).slice(0, 150)}`);
     }
 
   } catch (e) {
