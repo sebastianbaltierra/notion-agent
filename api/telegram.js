@@ -45,36 +45,29 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 500,
-        system: `Você é um agente que salva dados no Notion. Responda SOMENTE com JSON puro, sem markdown, sem explicação.
+        max_tokens: 300,
+        system: `Responda APENAS com JSON puro sem nenhum texto antes ou depois. Sem markdown. Sem explicação.
 
-Databases disponíveis:
+Databases:
 ${dbList}
 
-Formato obrigatório da resposta:
-{"database_id":"ID_AQUI","database_name":"NOME_AQUI","title":"TITULO_AQUI","confirmation":"CONFIRMACAO_AQUI"}
-
-Regras:
-- title: texto principal a salvar
-- confirmation: frase curta em português confirmando o que salvou
-- Se não souber o database, use Tarefas`,
-        messages: [{ role: "user", content: text }]
+Formato exato:
+{"database_id":"ID","database_name":"NOME","title":"TITULO","confirmation":"CONFIRMACAO"}`,
+        messages: [{ role: "user", content: text }, { role: "assistant", content: "{" }]
       })
     });
 
     const claudeData = await claudeRes.json();
-    const rawText = claudeData.content?.[0]?.text || "";
-    
-    // Extract JSON more aggressively
-    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      await sendTelegram(chat_id, "❌ Erro ao processar. Tente: *'Treino de peito hoje'*");
+    const rawText = "{" + (claudeData.content?.[0]?.text || "");
+
+    let parsed;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      await sendTelegram(chat_id, `❌ Debug: ${rawText.slice(0, 300)}`);
       return res.status(200).end();
     }
 
-    const parsed = JSON.parse(jsonMatch[0]);
-
-    // Get title field name
     const propsRes = await fetch(`${NOTION_API}?action=db-properties`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -96,7 +89,8 @@ Regras:
     if (createRes.ok) {
       await sendTelegram(chat_id, `✅ *${parsed.database_name}*\n${parsed.confirmation}`);
     } else {
-      await sendTelegram(chat_id, "❌ Erro ao salvar no Notion.");
+      const errData = await createRes.json();
+      await sendTelegram(chat_id, `❌ Notion erro: ${JSON.stringify(errData).slice(0, 200)}`);
     }
 
   } catch (e) {
