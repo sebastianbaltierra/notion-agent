@@ -1,7 +1,1 @@
-{
-  "functions": {
-    "api/notion.py": {
-      "runtime": "python3.9"
-    }
-  }
-}
+{}
