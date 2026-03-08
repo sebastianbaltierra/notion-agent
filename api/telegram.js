@@ -23,39 +23,18 @@ async function sendTelegram(chat_id, text) {
   });
 }
 
-async function getDbProperties(database_id) {
-  const r = await fetch(`${NOTION_API}?action=db-properties`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ database_id })
-  });
-  const d = await r.json();
-  return d.properties || {};
-}
-
-async function createNotionEntry(database_id, properties) {
-  const r = await fetch(`${NOTION_API}?action=create-task`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ database_id, properties })
-  });
-  return r.ok;
-}
-
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(200).end();
-
   const { message } = req.body;
   if (!message?.text) return res.status(200).end();
 
   const chat_id = message.chat.id;
   const text = message.text;
 
-  try {
-    await sendTelegram(chat_id, "⏳ Processando...");
+  await sendTelegram(chat_id, "⏳ Processando...");
 
-    // Ask Claude what to do
-    const dbList = Object.entries(DATABASES).map(([name, id]) => `- ${name} (id: ${id})`).join("\n");
+  try {
+    const dbList = Object.entries(DATABASES).map(([name, id]) => `${name}|${id}`).join("\n");
 
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -65,63 +44,63 @@ export default async function handler(req, res) {
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
-        system: `Você é um agente que salva informações no Notion do usuário.
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 500,
+        system: `Você é um agente que salva dados no Notion. Responda SOMENTE com JSON puro, sem markdown, sem explicação.
+
 Databases disponíveis:
 ${dbList}
 
-Com base na mensagem do usuário, decida qual database usar e quais propriedades preencher.
-Responda APENAS com JSON válido neste formato:
-{
-  "database_id": "id do database escolhido",
-  "database_name": "nome do database",
-  "properties": {
-    "Name": { "title": [{ "text": { "content": "título aqui" } }] }
-  },
-  "confirmation": "mensagem curta confirmando o que foi salvo"
-}
+Formato obrigatório da resposta:
+{"database_id":"ID_AQUI","database_name":"NOME_AQUI","title":"TITULO_AQUI","confirmation":"CONFIRMACAO_AQUI"}
 
 Regras:
-- Sempre inclua a propriedade title/Name
-- Para datas use formato YYYY-MM-DD
-- Se não souber qual database usar, use Tarefas
-- A confirmation deve ser em português, amigável e curta`,
+- title: texto principal a salvar
+- confirmation: frase curta em português confirmando o que salvou
+- Se não souber o database, use Tarefas`,
         messages: [{ role: "user", content: text }]
       })
     });
 
     const claudeData = await claudeRes.json();
-    const claudeText = claudeData.content?.[0]?.text || "";
-
-    let parsed;
-    try {
-      parsed = JSON.parse(claudeText.replace(/```json|```/g, "").trim());
-    } catch {
-      await sendTelegram(chat_id, "❌ Não entendi. Tente ser mais específico, ex: *'Treino de peito hoje'* ou *'Tarefa: ligar pro cliente'*");
+    const rawText = claudeData.content?.[0]?.text || "";
+    
+    // Extract JSON more aggressively
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      await sendTelegram(chat_id, "❌ Erro ao processar. Tente: *'Treino de peito hoje'*");
       return res.status(200).end();
     }
 
-    // Get db properties to build correct structure
-    const dbProps = await getDbProperties(parsed.database_id);
-    
-    // Merge Claude's properties with correct title field name
-    const titleField = Object.entries(dbProps).find(([, v]) => v.type === "title")?.[0] || "Name";
-    if (titleField !== "Name" && parsed.properties["Name"]) {
-      parsed.properties[titleField] = parsed.properties["Name"];
-      delete parsed.properties["Name"];
-    }
+    const parsed = JSON.parse(jsonMatch[0]);
 
-    const ok = await createNotionEntry(parsed.database_id, parsed.properties);
+    // Get title field name
+    const propsRes = await fetch(`${NOTION_API}?action=db-properties`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ database_id: parsed.database_id })
+    });
+    const propsData = await propsRes.json();
+    const titleField = Object.entries(propsData.properties || {}).find(([, v]) => v.type === "title")?.[0] || "Name";
 
-    if (ok) {
+    const properties = {
+      [titleField]: { title: [{ text: { content: parsed.title } }] }
+    };
+
+    const createRes = await fetch(`${NOTION_API}?action=create-task`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ database_id: parsed.database_id, properties })
+    });
+
+    if (createRes.ok) {
       await sendTelegram(chat_id, `✅ *${parsed.database_name}*\n${parsed.confirmation}`);
     } else {
-      await sendTelegram(chat_id, "❌ Erro ao salvar no Notion. Tente novamente.");
+      await sendTelegram(chat_id, "❌ Erro ao salvar no Notion.");
     }
 
   } catch (e) {
-    await sendTelegram(chat_id, "❌ Erro interno. Tente novamente.");
+    await sendTelegram(chat_id, `❌ Erro: ${e.message}`);
   }
 
   res.status(200).end();
