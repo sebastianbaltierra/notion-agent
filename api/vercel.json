@@ -1,5 +1,7 @@
 {
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/notion.py" }
-  ]
+  "functions": {
+    "api/notion.py": {
+      "runtime": "python3.9"
+    }
+  }
 }
